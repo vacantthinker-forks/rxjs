@@ -1,7 +1,7 @@
 import { expect } from 'chai';
-import { Subject, ObjectUnsubscribedError, Observable, AsyncSubject, Observer, of, config } from 'rxjs';
+import { Subject, ObjectUnsubscribedError, Observable, AsyncSubject, Observer, of, config, throwError, concat } from 'rxjs';
 import { AnonymousSubject } from 'rxjs/internal/Subject';
-import { delay } from 'rxjs/operators';
+import { catchError, delay, map, mergeMap } from 'rxjs/operators';
 import { TestScheduler } from 'rxjs/testing';
 import { observableMatcher } from './helpers/observableMatcher';
 
@@ -430,6 +430,30 @@ describe('Subject', () => {
     done();
   });
 
+  it('should expose observed status', () => {
+    const subject = new Subject();
+
+    expect(subject.observed).to.equal(false);
+
+    const sub1 = subject.subscribe(function (x) {
+      //noop
+    });
+
+    expect(subject.observed).to.equal(true);
+
+    const sub2 = subject.subscribe(function (x) {
+      //noop
+    });
+
+    expect(subject.observed).to.equal(true);
+    sub1.unsubscribe();
+    expect(subject.observed).to.equal(true);
+    sub2.unsubscribe();
+    expect(subject.observed).to.equal(false);
+    subject.unsubscribe();
+    expect(subject.observed).to.equal(false);
+  });
+
   it('should have a static create function that works', () => {
     expect(Subject.create).to.be.a('function');
     const source = of(1, 2, 3, 4, 5);
@@ -733,5 +757,169 @@ describe('AnonymousSubject', () => {
 
     observable.subscribe();
     expect(subscribed).to.be.true;
+  });
+});
+
+describe('useDeprecatedSynchronousErrorHandling', () => {
+  beforeEach(() => {
+    config.useDeprecatedSynchronousErrorHandling = true;
+  });
+
+  afterEach(() => {
+    config.useDeprecatedSynchronousErrorHandling = false;
+  });
+
+  it('should throw an error when nexting with a flattened, erroring inner observable', () => {
+    const subject = new Subject<string>();
+    subject.pipe(mergeMap(() => throwError(() => new Error('bad')))).subscribe();
+
+    expect(() => {
+      subject.next('wee');
+    }).to.throw(Error, 'bad');
+  });
+
+  it('should throw an error when nexting with a flattened, erroring inner observable with more than one operator', () => {
+    const subject = new Subject<string>();
+    subject.pipe(mergeMap(() => throwError(() => new Error('bad'))), map(x => x)).subscribe();
+
+    expect(() => {
+      subject.next('wee');
+    }).to.throw(Error, 'bad');
+  });
+
+  it('should throw an error when notifying an error with catchError returning an erroring inner observable', () => {
+    const subject = new Subject<string>();
+    subject.pipe(catchError(() => throwError(() => new Error('bad')))).subscribe();
+
+    expect(() => {
+      subject.error('wee');
+    }).to.throw(Error, 'bad');
+  });
+
+  it('should throw an error when nexting with an operator that errors synchronously', () => {
+    const subject = new Subject<string>();
+    subject.pipe(mergeMap(() => {
+      throw new Error('lol');
+    })).subscribe();
+
+    expect(() => {
+      subject.next('wee');
+    }).to.throw(Error, 'lol');
+  });
+
+  
+  it('should throw an error when notifying an error with a catchError that errors synchronously', () => {
+    const subject = new Subject<string>();
+    subject.pipe(catchError(() => {
+      throw new Error('lol');
+    })).subscribe();
+
+    expect(() => {
+      subject.error('wee');
+    }).to.throw(Error, 'lol');
+  });
+
+  it('should throw an error when nexting with an erroring next handler', () => {
+    const subject = new Subject<string>();
+    subject.subscribe(() => {
+      throw new Error('lol');
+    });
+
+    expect(() => {
+      subject.next('wee');
+    }).to.throw(Error, 'lol');
+  });
+
+  it('should throw an error when notifying with an erroring error handler', () => {
+    const subject = new Subject<string>();
+    subject.subscribe({
+      error: () => {
+        throw new Error('lol');
+      }
+    });
+
+    expect(() => {
+      subject.error('wee');
+    }).to.throw(Error, 'lol');
+  });
+
+  it('should throw an error when notifying with an erroring complete handler', () => {
+    const subject = new Subject<string>();
+    subject.subscribe({
+      complete: () => {
+        throw new Error('lol');
+      }
+    });
+
+    expect(() => {
+      subject.complete();
+    }).to.throw(Error, 'lol');
+  });
+
+  // TODO: This is still an issue. Not sure how to handle this one yet.
+  it.skip('should throw an error when notifying an complete, and concatenated with another observable that synchronously errors', () => {
+    const subject = new Subject<string>();
+    concat(subject, throwError(new Error('lol'))).subscribe();
+
+    expect(() => {
+      subject.complete();
+    }).to.throw(Error, 'lol');
+  });
+
+  it('should not throw on second error passed', () => {
+    const subject = new Subject();
+
+    subject.subscribe();
+    
+    expect(() => {
+      subject.error(new Error('one'));
+    }).to.throw(Error, 'one');
+
+    expect(() => {
+      subject.error(new Error('two'));
+    }).not.to.throw(Error, 'two');
+  });
+
+  it('should not throw on second error passed, even after having been operated on', () => {
+    const subject = new Subject();
+
+    subject.pipe(mergeMap(x => [x])).subscribe();
+    
+    expect(() => {
+      subject.error(new Error('one'));
+    }).to.throw(Error, 'one');
+
+    expect(() => {
+      subject.error('two');
+    }).not.to.throw();
+  });
+
+  it('deep rethrowing 1', () => {
+    const subject1 = new Subject();
+    const subject2 = new Subject();
+
+    subject2.subscribe();
+
+    subject1.subscribe({
+      next: () => subject2.error(new Error('hahaha'))
+    });
+
+    expect(() => {
+      subject1.next('test');
+    }).to.throw(Error, 'hahaha');
+  });
+
+  it('deep rethrowing 2', () => {
+    const subject1 = new Subject();
+
+    subject1.subscribe({
+      next: () => {
+        throwError(new Error('hahaha')).subscribe();
+      }
+    });
+
+    expect(() => {
+      subject1.next('test');
+    }).to.throw(Error, 'hahaha');
   });
 });
